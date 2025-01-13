@@ -1,0 +1,44 @@
+{
+    "timestamp": "20250113_000001",
+    "config": {
+        "batch_size": 32,
+        "vocab_size": 11914,
+        "embedding_dim": 64,
+        "num_heads": 8,
+        "sequences": {
+            "total": 183768,
+            "train": 14700,
+            "test": 3676
+        },
+        "tokenizer": {
+            "type": "Custom Keras Tokenizer",
+            "vocab_size": 11914,
+            "char_level": false,
+            "filters": ""
+        },
+        "embedding": {
+            "type": "Custom trainable embeddings",
+            "dimension": 64,
+            "trainable": true,
+            "initialization": "random uniform"
+        }
+    },
+    "history": {
+        "accuracy": [
+            0.039419934153556824
+        ],
+        "loss": [
+            7.025618076324463
+        ],
+        "val_accuracy": [
+            0.03468247503042221
+        ],
+        "val_loss": [
+            6.764420032501221
+        ]
+    },
+    "test_results": {
+        "loss": 6.76414680480957,
+        "accuracy": 0.03488688915967941
+    }
+}
