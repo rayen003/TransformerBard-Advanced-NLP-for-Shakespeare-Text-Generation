@@ -1,118 +1,106 @@
 import tensorflow as tf
-import numpy as np
 from transformers import AutoTokenizer
 from sklearn.model_selection import train_test_split
 
 class Preprocessing_pipeline:
-    def __init__(self, file_path, max_length=50, batch_size=16) -> None:
+    def __init__(self, file_path, max_length=50, batch_size=32, model_name='prajjwal1/bert-tiny'):
         self.file_path = file_path
         self.max_length = max_length
         self.batch_size = batch_size
-        
-        # Initialize tiny BERT tokenizer (much smaller model)
-        model_name = 'prajjwal1/bert-tiny'  # Only 4.4MB
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.vocab_size = self.tokenizer.vocab_size
-        
+    
     def get_raw_text(self):
-        try:
-            with open(self.file_path, 'r', encoding='utf-8') as file:
-                return file.read()
-        except FileNotFoundError:
-            print(f"Error: Could not find file at {self.file_path}")
-            raise
+        """Read raw text from file"""
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            return f.read()
     
-    def create_sequences(self, text, max_sequences=1000):
-        """Create overlapping sequences from text"""
-        # Tokenize the entire text first
-        encoded = self.tokenizer(text, return_tensors='tf')
-        tokens = encoded['input_ids'][0]  # Get the token IDs
+    def create_sequences(self, text, max_sequences=None):
+        """Create input sequences and targets"""
+        # Tokenize text
+        tokens = self.tokenizer.encode(text)
         
-        # Calculate total possible sequences
-        total_sequences = len(tokens) - self.max_length
-        max_sequences = min(total_sequences, max_sequences)
+        # Create sequences
+        sequences = []
+        attention_masks = []
+        next_tokens = []
         
-        # Initialize arrays for sequences
-        all_input_sequences = []
-        all_target_sequences = []
-        all_attention_masks = []
-        
-        # Process in batches
-        batch_size = 100
-        for start_idx in range(0, max_sequences, batch_size):
-            end_idx = min(start_idx + batch_size, max_sequences)
-            batch_size_actual = end_idx - start_idx
-            
-            # Initialize tensors for this batch
-            input_sequences = []
-            target_sequences = []
-            attention_masks = []
-            
-            # Create sequences for this batch
-            for i in range(start_idx, end_idx):
-                # Get input sequence
-                input_seq = tokens[i:i + self.max_length]
-                # Get target (next token)
-                target = tokens[i + self.max_length]
+        for i in range(0, len(tokens) - self.max_length):
+            if max_sequences and i >= max_sequences:
+                break
                 
-                # Pad input sequence if needed
-                if len(input_seq) < self.max_length:
-                    padding = tf.zeros(self.max_length - len(input_seq), dtype=tf.int32)
-                    input_seq = tf.concat([input_seq, padding], axis=0)
-                
-                input_sequences.append(input_seq)
-                target_sequences.append(target)
-                attention_masks.append(tf.ones(self.max_length))  # All tokens are real (no padding)
+            # Get sequence and target
+            sequence = tokens[i:i + self.max_length]
+            next_token = tokens[i + self.max_length]
             
-            # Stack sequences
-            input_sequences = tf.stack(input_sequences)
-            target_sequences = tf.one_hot(target_sequences, depth=self.vocab_size)
-            attention_masks = tf.stack(attention_masks)
+            # Create attention mask
+            attention_mask = [1] * self.max_length
             
-            # Append to main lists
-            all_input_sequences.append(input_sequences)
-            all_target_sequences.append(target_sequences)
-            all_attention_masks.append(attention_masks)
+            # Convert target to one-hot
+            target = tf.one_hot(next_token, self.vocab_size)
+            
+            sequences.append(sequence)
+            attention_masks.append(attention_mask)
+            next_tokens.append(target)
         
-        # Concatenate all batches
-        return (
-            tf.concat(all_input_sequences, axis=0),
-            tf.concat(all_target_sequences, axis=0),
-            tf.concat(all_attention_masks, axis=0)
-        )
+        # Convert to tensors
+        input_sequences = tf.convert_to_tensor(sequences)
+        attention_masks = tf.convert_to_tensor(attention_masks)
+        target_sequences = tf.stack(next_tokens)
+        
+        return input_sequences, target_sequences, attention_masks
     
-    def data_generator(self, input_sequences, target_sequences, attention_masks, batch_size):
-        dataset = tf.data.Dataset.from_tensor_slices((
-            {
-                'input_ids': input_sequences,
-                'attention_mask': attention_masks,
-            },
-            target_sequences
-        ))
-        return dataset.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)  # Reduced shuffle buffer
-    
-    def prepare_data(self, max_sequences=1000):
-        """Prepare data for training"""
+    def prepare_training_data(self, use_percentage=0.15):
+        """Prepare data for training using specified percentage"""
         # Get text and create sequences
         text = self.get_raw_text()
-        self.input_sequences, self.target_sequences, self.attention_masks = self.create_sequences(text, max_sequences)
+        total_sequences = len(text.split()) - self.max_length
+        max_sequences = int(total_sequences * use_percentage)
+        print(f"Using {max_sequences} sequences ({use_percentage*100}% of total)")
         
-        return (self.input_sequences, self.target_sequences, self.attention_masks)
-    
-    def __call__(self, batch_size=16):
-        self.prepare_data()
-        generator = self.data_generator(self.input_sequences, self.target_sequences, self.attention_masks, batch_size)
+        # Get sequences
+        input_sequences, target_sequences, attention_masks = self.create_sequences(
+            text, max_sequences=max_sequences
+        )
         
-        print("\nPreprocessing Results:")
-        print("=" * 20)
-        print(f"Vocabulary Size: {self.vocab_size}")
-        print(f"Batch Size: {batch_size}")
-        print("=" * 20)
+        # Convert to numpy for splitting
+        input_sequences = input_sequences.numpy()
+        target_sequences = target_sequences.numpy()
+        attention_masks = attention_masks.numpy()
         
-        return generator, self.vocab_size
-
+        # Split into train and validation
+        train_inputs, val_inputs, train_targets, val_targets, train_masks, val_masks = train_test_split(
+            input_sequences, target_sequences, attention_masks,
+            test_size=0.1, random_state=42
+        )
+        
+        # Create datasets
+        train_data = {
+            'input_ids': tf.convert_to_tensor(train_inputs),
+            'attention_mask': tf.convert_to_tensor(train_masks)
+        }
+        val_data = {
+            'input_ids': tf.convert_to_tensor(val_inputs),
+            'attention_mask': tf.convert_to_tensor(val_masks)
+        }
+        
+        # Create tf.data.Dataset
+        train_dataset = tf.data.Dataset.from_tensor_slices(
+            (train_data, tf.convert_to_tensor(train_targets))
+        ).shuffle(1000).batch(self.batch_size)
+        
+        val_dataset = tf.data.Dataset.from_tensor_slices(
+            (val_data, tf.convert_to_tensor(val_targets))
+        ).batch(self.batch_size)
+        
+        return train_dataset, val_dataset
 
 PATH = "/Users/rayengallas/Desktop/Coding_projects/Project/data/shakespeare.txt"
 if __name__ == '__main__':
     preprocessor = Preprocessing_pipeline(PATH)
-    preprocessor(batch_size=16)
+    train_dataset, val_dataset = preprocessor.prepare_training_data()
+    print("\nPreprocessing Results:")
+    print("=" * 20)
+    print(f"Vocabulary Size: {preprocessor.vocab_size}")
+    print(f"Batch Size: {preprocessor.batch_size}")
+    print("=" * 20)

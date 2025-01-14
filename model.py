@@ -1,57 +1,44 @@
 import tensorflow as tf
+from transformers import AutoModel, TFAutoModel
 import numpy as np
+import os
 
-class TransformerModel(tf.keras.Model):
-    def __init__(self, vocab_size, embedding_dim, num_heads=8, ff_dim=256, num_transformer_blocks=6, dropout=0.1, max_sequence_length=100):
-        super(TransformerModel, self).__init__()
+class TinyBERTModel(tf.keras.Model):
+    def __init__(self, model_name, max_length, vocab_size):
+        super(TinyBERTModel, self).__init__()
+        self.max_length = max_length
+        self.vocab_size = vocab_size
         
-        self.pos_encoding = self._positional_encoding(max_sequence_length, embedding_dim)
-        self.dropout = tf.keras.layers.Dropout(dropout)
-        self.encoder = tf.keras.Sequential([
-            tf.keras.layers.LayerNormalization(epsilon=1e-6),
-            tf.keras.layers.Dense(embedding_dim, activation='relu')
-        ])
+        # Load pre-trained TinyBERT (convert from PyTorch weights)
+        self.bert = TFAutoModel.from_pretrained(model_name, from_pt=True)
         
-        self.transformer_blocks = []
-        for _ in range(num_transformer_blocks):
-            self.transformer_blocks.append(
-                TransformerBlock(embedding_dim, num_heads, ff_dim, dropout)
-            )
-        
-        self.final_layer = tf.keras.Sequential([
-            tf.keras.layers.LayerNormalization(epsilon=1e-6),
-            tf.keras.layers.Dense(vocab_size)
-        ])
-    
-    def _positional_encoding(self, max_len, d_model):
-        pos_encoding = np.zeros((max_len, d_model))
-        position = np.arange(max_len)[:, np.newaxis]
-        div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
-        
-        pos_encoding[:, 0::2] = np.sin(position * div_term)
-        pos_encoding[:, 1::2] = np.cos(position * div_term)
-        
-        pos_encoding = pos_encoding[np.newaxis, ...]
-        return tf.cast(pos_encoding, dtype=tf.float32)
+        # Add prediction head
+        self.dense = tf.keras.layers.Dense(vocab_size, activation=None)
     
     def call(self, inputs, training=False):
-        # inputs shape: (batch_size, seq_len, embedding_dim)
-        seq_len = tf.shape(inputs)[1]
+        # Get BERT outputs
+        bert_outputs = self.bert(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask'],
+            training=training
+        )
         
-        # Add positional encoding
-        x = inputs * tf.math.sqrt(tf.cast(tf.shape(inputs)[-1], tf.float32))
-        x += self.pos_encoding[:, :seq_len, :]
+        # Get the hidden states
+        hidden_states = bert_outputs.last_hidden_state  # Shape: (batch_size, seq_len, hidden_size)
         
-        # Apply dropout and encoding
-        x = self.dropout(x, training=training)
-        x = self.encoder(x)
+        # Use the last token's representation for prediction
+        last_hidden_state = hidden_states[:, -1, :]  # Shape: (batch_size, hidden_size)
         
-        # Pass through transformer blocks with residual connections
-        for transformer_block in self.transformer_blocks:
-            x = x + transformer_block(x, training=training)  # Added residual connection
+        # Make prediction
+        logits = self.dense(last_hidden_state)  # Shape: (batch_size, vocab_size)
         
-        # Final layer
-        return self.final_layer(x)
+        return logits
+    
+    def loss(self, targets, predictions):
+        """Calculate loss between targets and predictions"""
+        return tf.keras.losses.categorical_crossentropy(
+            targets, predictions, from_logits=True
+        )
 
 
 class TransformerBlock(tf.keras.layers.Layer):
@@ -89,3 +76,50 @@ class TransformerBlock(tf.keras.layers.Layer):
         ffn_output = self.ffn(x)
         ffn_output = self.dropout2(ffn_output, training=training)
         return out1 + ffn_output  # Residual connection
+
+
+class CustomLanguageModel(tf.keras.Model):
+    def __init__(self, model_name, max_length, vocab_size, embed_dim=256, num_heads=4, ff_dim=512):
+        super(CustomLanguageModel, self).__init__()
+        self.max_length = max_length
+        self.vocab_size = vocab_size
+        
+        # Load pre-trained BERT for embeddings only
+        self.bert = TFAutoModel.from_pretrained(model_name, from_pt=True)
+        
+        # Freeze BERT weights
+        self.bert.trainable = False
+        
+        # Add custom transformer blocks
+        self.transformer_block1 = TransformerBlock(embed_dim, num_heads, ff_dim)
+        self.transformer_block2 = TransformerBlock(embed_dim, num_heads, ff_dim)
+        
+        # Project BERT hidden size to our embed_dim
+        self.projection = tf.keras.layers.Dense(embed_dim)
+        
+        # Final prediction layer
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+    
+    def call(self, inputs, training=False):
+        # Get BERT embeddings
+        bert_outputs = self.bert(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask'],
+            training=False  # Always False since we're not training BERT
+        )
+        
+        # Get hidden states and project to our dimension
+        hidden_states = bert_outputs.last_hidden_state
+        x = self.projection(hidden_states)
+        
+        # Pass through transformer blocks
+        x = self.transformer_block1(x, training=training)
+        x = self.transformer_block2(x, training=training)
+        
+        # Use the last token's representation for prediction
+        last_hidden_state = x[:, -1, :]
+        
+        # Make prediction
+        logits = self.final_layer(last_hidden_state)
+        
+        return logits
