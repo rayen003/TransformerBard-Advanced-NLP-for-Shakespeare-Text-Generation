@@ -1,125 +1,85 @@
 import tensorflow as tf
-from transformers import AutoModel, TFAutoModel
-import numpy as np
-import os
 
-class TinyBERTModel(tf.keras.Model):
-    def __init__(self, model_name, max_length, vocab_size):
-        super(TinyBERTModel, self).__init__()
-        self.max_length = max_length
-        self.vocab_size = vocab_size
+class TransformerModel(tf.keras.Model):
+    def __init__(self, num_layers, d_model, num_heads, dff, input_dim, vocab_size, dropout_rate=0.1):
+        super(TransformerModel, self).__init__()
+        self.num_layers = num_layers
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.dff = dff
+        self.dropout_rate = dropout_rate
         
-        # Load pre-trained TinyBERT (convert from PyTorch weights)
-        self.bert = TFAutoModel.from_pretrained(model_name, from_pt=True)
+        # Project input embeddings to model dimension
+        self.input_projection = tf.keras.layers.Dense(d_model)
         
-        # Add prediction head
-        self.dense = tf.keras.layers.Dense(vocab_size, activation=None)
-    
-    def call(self, inputs, training=False):
-        # Get BERT outputs
-        bert_outputs = self.bert(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
-            training=training
-        )
+        # Position embedding
+        self.pos_embedding = tf.keras.layers.Embedding(input_dim=50, output_dim=d_model)
         
-        # Get the hidden states
-        hidden_states = bert_outputs.last_hidden_state  # Shape: (batch_size, seq_len, hidden_size)
-        
-        # Use the last token's representation for prediction
-        last_hidden_state = hidden_states[:, -1, :]  # Shape: (batch_size, hidden_size)
-        
-        # Make prediction
-        logits = self.dense(last_hidden_state)  # Shape: (batch_size, vocab_size)
-        
-        return logits
-    
-    def loss(self, targets, predictions):
-        """Calculate loss between targets and predictions"""
-        return tf.keras.losses.categorical_crossentropy(
-            targets, predictions, from_logits=True
-        )
-
-
-class TransformerBlock(tf.keras.layers.Layer):
-    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
-        super(TransformerBlock, self).__init__()
-        
-        # Multi-head attention
-        self.att = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=embed_dim // num_heads,  # Scaled key dimension
-            value_dim=embed_dim // num_heads  # Scaled value dimension
-        )
-        
-        # Feed-forward network
-        self.ffn = tf.keras.Sequential([
-            tf.keras.layers.Dense(ff_dim, activation="gelu"),  # Changed to GELU
-            tf.keras.layers.Dense(embed_dim)
-        ])
-        
-        # Layer normalization and dropout
-        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.dropout1 = tf.keras.layers.Dropout(rate)
-        self.dropout2 = tf.keras.layers.Dropout(rate)
-    
-    def call(self, inputs, training=False):
-        # Layer normalization and attention
-        x = self.layernorm1(inputs)
-        attn_output = self.att(x, x, x)
-        attn_output = self.dropout1(attn_output, training=training)
-        out1 = inputs + attn_output  # Residual connection
-        
-        # Layer normalization and feed-forward
-        x = self.layernorm2(out1)
-        ffn_output = self.ffn(x)
-        ffn_output = self.dropout2(ffn_output, training=training)
-        return out1 + ffn_output  # Residual connection
-
-
-class CustomLanguageModel(tf.keras.Model):
-    def __init__(self, model_name, max_length, vocab_size, embed_dim=256, num_heads=4, ff_dim=512):
-        super(CustomLanguageModel, self).__init__()
-        self.max_length = max_length
-        self.vocab_size = vocab_size
-        
-        # Load pre-trained BERT for embeddings only
-        self.bert = TFAutoModel.from_pretrained(model_name, from_pt=True)
-        
-        # Freeze BERT weights
-        self.bert.trainable = False
-        
-        # Add custom transformer blocks
-        self.transformer_block1 = TransformerBlock(embed_dim, num_heads, ff_dim)
-        self.transformer_block2 = TransformerBlock(embed_dim, num_heads, ff_dim)
-        
-        # Project BERT hidden size to our embed_dim
-        self.projection = tf.keras.layers.Dense(embed_dim)
+        # Transformer blocks
+        self.transformer_blocks = [
+            TransformerBlock(d_model, num_heads, dff, dropout_rate)
+            for _ in range(num_layers)
+        ]
         
         # Final prediction layer
         self.final_layer = tf.keras.layers.Dense(vocab_size)
     
     def call(self, inputs, training=False):
-        # Get BERT embeddings
-        bert_outputs = self.bert(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
-            training=False  # Always False since we're not training BERT
-        )
+        # Get sequence length
+        seq_length = tf.shape(inputs)[1]
         
-        # Get hidden states and project to our dimension
-        hidden_states = bert_outputs.last_hidden_state
-        x = self.projection(hidden_states)
+        # Create position indices
+        positions = tf.range(start=0, limit=seq_length, delta=1)
+        
+        # Project input embeddings to model dimension
+        x = self.input_projection(inputs)
+        
+        # Add positional embeddings
+        pos_emb = self.pos_embedding(positions)
+        x = x + pos_emb
         
         # Pass through transformer blocks
-        x = self.transformer_block1(x, training=training)
-        x = self.transformer_block2(x, training=training)
+        for block in self.transformer_blocks:
+            x = block(x, training=training)
         
-        # Use the last token's representation for prediction
-        last_hidden_state = x[:, -1, :]
+        # Get the last token's representation
+        x = x[:, -1, :]
         
         # Make prediction
-        logits = self.final_layer(last_hidden_state)
+        return self.final_layer(x)
+
+class TransformerBlock(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, dropout_rate):
+        super(TransformerBlock, self).__init__()
         
-        return logits
+        # Multi-head attention
+        self.mha = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            value_dim=d_model // num_heads
+        )
+        
+        # Feed-forward network
+        self.ffn = tf.keras.Sequential([
+            tf.keras.layers.Dense(dff, activation='relu'),
+            tf.keras.layers.Dense(d_model)
+        ])
+        
+        # Layer normalization
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        
+        # Dropout
+        self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
+        self.dropout2 = tf.keras.layers.Dropout(dropout_rate)
+    
+    def call(self, x, training=False):
+        # Multi-head attention
+        attn_output = self.mha(query=x, key=x, value=x)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = self.layernorm1(x + attn_output)
+        
+        # Feed-forward network
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        return self.layernorm2(out1 + ffn_output)
