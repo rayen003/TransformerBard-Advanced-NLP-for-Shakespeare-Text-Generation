@@ -29,6 +29,10 @@ class TransformerModel(tf.keras.Model):
         self.loss_metric = tf.keras.metrics.Mean(name='train_loss')
     
     def call(self, inputs, training=False):
+        # Handle input dict if necessary
+        if isinstance(inputs, dict):
+            inputs = inputs['input_ids']
+        
         # Get sequence length and batch size
         seq_length = tf.shape(inputs)[1]
         batch_size = tf.shape(inputs)[0]
@@ -135,7 +139,7 @@ if __name__ == '__main__':
         print(f"- Target shape: {targets.shape}")  # Should be (batch_size,)
         
         # Get model predictions
-        predictions = model(inputs['input_ids'], training=False)
+        predictions = model(inputs, training=False)
         
         print("\n2. Model Internal Shapes:")
         print(f"- After token embedding: {model.token_embedding(inputs['input_ids']).shape}")  # (batch_size, seq_len, d_model)
