@@ -4,145 +4,161 @@ import os
 import json
 from model import TransformerModel
 from preprocessing_pipeline import Preprocessing_pipeline
+import numpy as np
 
 class Training_pipeline:
-    def __init__(self, preprocessor):
+    def __init__(self, model, preprocessor, batch_size=32, learning_rate=0.001):
+        self.model = model
         self.preprocessor = preprocessor
-        self.experiment_dir = os.path.join('experiments', datetime.now().strftime("%Y%m%d-%H%M%S"))
-        os.makedirs(self.experiment_dir, exist_ok=True)
-        self.model = None
-        self.history = None
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        self.loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         
-        # Model hyperparameters
-        self.d_model = 256
-        self.num_heads = 8
-        self.dff = 512
-        self.num_layers = 4
-        self.dropout_rate = 0.1
+        # Initialize metrics
+        self.train_loss = tf.keras.metrics.Mean(name='train_loss')
+        self.train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
+        self.val_loss = tf.keras.metrics.Mean(name='val_loss')
+        self.val_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='val_accuracy')
+        
+        # Initialize experiment tracking
+        self.experiment_dir = None
+        self.experiment_metrics = {
+            'train_loss': [],
+            'train_accuracy': [],
+            'val_loss': [],
+            'val_accuracy': []
+        }
     
-    def create_model(self):
-        """Create and compile the transformer model"""
-        # Create model
-        self.model = TransformerModel(
-            num_layers=self.num_layers,
-            d_model=self.d_model,
-            num_heads=self.num_heads,
-            dff=self.dff,
-            input_dim=128,  # TinyBERT's embedding dimension
-            vocab_size=self.preprocessor.vocabulary_size,
-            dropout_rate=self.dropout_rate
-        )
+    @tf.function
+    def train_step(self, inputs, targets):
+        with tf.GradientTape() as tape:
+            # Forward pass
+            predictions = self.model(inputs['input_ids'], training=True)
+            
+            # Calculate loss
+            loss = self.loss_fn(targets, predictions)
         
-        # Learning rate schedule
-        initial_learning_rate = 5e-5
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate,
-            decay_steps=1000,
-            decay_rate=0.9
-        )
+        # Calculate gradients and update weights
+        gradients = tape.gradient(loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
         
-        # Optimizer with gradient clipping
-        optimizer = tf.keras.optimizers.Adam(
-            learning_rate=lr_schedule,
-            clipnorm=1.0
-        )
+        # Update metrics
+        self.train_loss(loss)
+        self.train_accuracy(targets, predictions)
         
-        # Compile model
-        self.model.compile(
-            optimizer=optimizer,
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
+        return loss
+    
+    @tf.function
+    def val_step(self, inputs, targets):
+        # Forward pass
+        predictions = self.model(inputs['input_ids'], training=False)
         
-        print("\nModel architecture:")
-        print("=" * 20)
-        print(f"Number of layers: {self.num_layers}")
-        print(f"Hidden size: {self.d_model}")
-        print(f"Number of heads: {self.num_heads}")
-        print(f"Feed-forward size: {self.dff}")
-        print(f"Vocabulary size: {self.preprocessor.vocabulary_size}")
-        print("=" * 20)
+        # Calculate loss
+        loss = self.loss_fn(targets, predictions)
         
-        return self.model
+        # Update metrics
+        self.val_loss(loss)
+        self.val_accuracy(targets, predictions)
         
-    def train(self, dataset, epochs=10, validation_split=0.2):
-        """Train the model"""
+        return loss
+    
+    def train(self, epochs=10, validation_split=0.2, experiment_dir=None):
+        """Train the model for a specified number of epochs"""
+        print("\nStarting model training...")
         print(f"\nTraining model for {epochs} epochs with {validation_split*100}% validation split...")
         
-        # Get dataset size
-        dataset_size = sum(1 for _ in dataset)
-        val_size = int(dataset_size * validation_split)
-        train_size = dataset_size - val_size
+        # Get dataset
+        dataset = self.preprocessor.prepare_data()
         
-        print(f"Dataset split:")
-        print(f"- Total sequences: {dataset_size}")
+        # Calculate dataset sizes
+        total_size = sum(1 for _ in dataset)
+        train_size = int(total_size * (1 - validation_split))
+        val_size = total_size - train_size
+        
+        print("Dataset split:")
+        print(f"- Total sequences: {total_size}")
         print(f"- Training sequences: {train_size}")
         print(f"- Validation sequences: {val_size}")
         
         # Split dataset
         train_dataset = dataset.take(train_size)
-        val_dataset = dataset.skip(train_size).take(val_size)
+        val_dataset = dataset.skip(train_size)
         
-        # Add repeat to the datasets
-        train_dataset = train_dataset.repeat()
-        if val_size > 0:
-            val_dataset = val_dataset.repeat()
+        # Set up experiment directory
+        if experiment_dir:
+            self.experiment_dir = experiment_dir
+            os.makedirs(self.experiment_dir, exist_ok=True)
         
-        # Calculate steps per epoch - ensure at least 1 step
-        steps_per_epoch = max(1, train_size // self.preprocessor.batch_size)
-        validation_steps = max(1, val_size // self.preprocessor.batch_size) if val_size > 0 else None
-        
-        # Train model
-        self.history = self.model.fit(
-            train_dataset,
-            epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
-            validation_data=val_dataset if val_size > 0 else None,
-            validation_steps=validation_steps,
-            callbacks=[
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='loss',
-                    patience=3,
-                    restore_best_weights=True
-                ),
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=os.path.join(self.experiment_dir, 'best_model.keras'),
-                    monitor='loss',
-                    save_best_only=True
-                )
-            ]
-        )
+        # Training loop
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            
+            # Reset metrics
+            self.train_loss.reset_states()
+            self.train_accuracy.reset_states()
+            self.val_loss.reset_states()
+            self.val_accuracy.reset_states()
+            
+            # Training
+            for batch in train_dataset:
+                inputs, targets = batch
+                loss = self.train_step(inputs, targets)
+                
+            # Validation
+            for batch in val_dataset:
+                inputs, targets = batch
+                loss = self.val_step(inputs, targets)
+            
+            # Print metrics
+            template = 'Epoch {}, Loss: {:.4f}, Accuracy: {:.4f}, Val Loss: {:.4f}, Val Accuracy: {:.4f}'
+            print(template.format(epoch + 1,
+                                self.train_loss.result(),
+                                self.train_accuracy.result(),
+                                self.val_loss.result(),
+                                self.val_accuracy.result()))
+            
+            # Store metrics
+            self.experiment_metrics['train_loss'].append(float(self.train_loss.result()))
+            self.experiment_metrics['train_accuracy'].append(float(self.train_accuracy.result()))
+            self.experiment_metrics['val_loss'].append(float(self.val_loss.result()))
+            self.experiment_metrics['val_accuracy'].append(float(self.val_accuracy.result()))
+            
+            # Save experiment metrics
+            if self.experiment_dir:
+                metrics_file = os.path.join(self.experiment_dir, 'experiment.json')
+                with open(metrics_file, 'w') as f:
+                    json.dump(self.experiment_metrics, f, indent=4)
 
 if __name__ == '__main__':
     PATH = "/Users/rayengallas/Desktop/Coding_projects/Project/data/shakespeare.txt"
-    USE_PERCENTAGE = 0.01
     
-    print(f"Initializing pipeline with {USE_PERCENTAGE*100}% of data...")
-    
-    # Initialize preprocessor with desired percentage
+    print("Initializing pipeline with 1.0% of data...")
+    # Initialize preprocessor
     preprocessor = Preprocessing_pipeline(
         file_path=PATH,
+        use_percentage=0.01,
         max_length=50,
-        batch_size=32,
-        model_name='prajjwal1/bert-tiny',
-        use_percentage=USE_PERCENTAGE
+        batch_size=32
     )
-    
-    print(f"Preprocessor initialized with {preprocessor.use_percentage*100}% of data")
-    print("Starting data preparation...")
-    
-    # Get preprocessed data
-    dataset = preprocessor.prepare_data()
     
     print("\nInitializing training pipeline...")
     # Initialize trainer and create model
-    trainer = Training_pipeline(preprocessor)
-    model = trainer.create_model()
+    model = TransformerModel(
+        num_layers=4,
+        d_model=256,
+        num_heads=8,
+        dff=512,
+        input_dim=128,  # TinyBERT's embedding dimension
+        vocab_size=preprocessor.vocabulary_size,
+        dropout_rate=0.1
+    )
+    trainer = Training_pipeline(model, preprocessor)
     
     print("\nStarting model training...")
     # Train model
     trainer.train(
-        dataset=dataset,
         epochs=10,
-        validation_split=0.2
+        validation_split=0.2,
+        experiment_dir=os.path.join('experiments', datetime.now().strftime("%Y%m%d-%H%M%S"))
     )
