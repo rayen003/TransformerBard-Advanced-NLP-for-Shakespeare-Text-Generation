@@ -34,10 +34,13 @@ env/
 # Project specific
 experiments/
 *.h5
-*.weights.h5
 *.model
 logs/
 checkpoints/
+
+# Model weights
+*.weights.h5
+experiments/**/weights.weights.h5
 
 # Misc
 .DS_Store
