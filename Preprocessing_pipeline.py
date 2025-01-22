@@ -5,11 +5,14 @@ import warnings
 import urllib3
 import numpy as np
 
+# Filter warnings
+warnings.filterwarnings('ignore')
+tf.get_logger().setLevel('ERROR')
 warnings.filterwarnings('ignore', category=urllib3.exceptions.NotOpenSSLWarning)
 
 
 class Preprocessing_pipeline:
-    def __init__(self, file_path, max_length=50, batch_size=32, model_name='prajjwal1/bert-tiny'):
+    def __init__(self, file_path, max_length=32, batch_size=32, model_name='prajjwal1/bert-tiny'):
         self.file_path = file_path
         self.max_length = max_length
         self.batch_size = batch_size
@@ -28,7 +31,7 @@ class Preprocessing_pipeline:
 
         # Tokenize text
         print("\nTokenizing text...")
-        tokens = self.tokenizer(text, return_tensors='tf', truncation=True, max_length=None)
+        tokens = self.tokenizer(text, return_tensors='tf', truncation=False)  # Don't truncate for training data
         token_ids = tokens['input_ids'].numpy()[0]
         print(f"Generated {len(token_ids)} tokens")
 
@@ -68,7 +71,7 @@ class Preprocessing_pipeline:
         
         # Create dataset
         dataset = tf.data.Dataset.from_tensor_slices((
-            {'input_ids': input_sequences},
+            input_sequences,
             target_sequences
         ))
         
@@ -76,6 +79,8 @@ class Preprocessing_pipeline:
         dataset = dataset.cache()
         dataset = dataset.shuffle(buffer_size=10000)
         dataset = dataset.batch(batch_size=self.batch_size, drop_remainder=True)
+        
+        # No need to reshape targets, they're already in the right shape
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
         
         return dataset
@@ -93,7 +98,7 @@ if __name__ == '__main__':
     # Initialize preprocessor
     preprocessor = Preprocessing_pipeline(
         file_path=PATH,
-        max_length=50,
+        max_length=32,
         batch_size=32,
         model_name='prajjwal1/bert-tiny'
     )
@@ -110,11 +115,11 @@ if __name__ == '__main__':
     print("\nChecking data shapes...")
     for inputs, targets in dataset.take(1):
         print("\nSample batch shapes:")
-        print(f"Input shape: {inputs['input_ids'].shape}")  # Should be (batch_size, seq_len)
+        print(f"Input shape: {inputs.shape}")  # Should be (batch_size, seq_len)
         print(f"Target shape: {targets.shape}")  # Should be (batch_size,)
         
         # Print value ranges
         print("\nValue ranges:")
-        print(f"Inputs - min: {tf.reduce_min(inputs['input_ids'])}, max: {tf.reduce_max(inputs['input_ids'])}")
+        print(f"Inputs - min: {tf.reduce_min(inputs)}, max: {tf.reduce_max(inputs)}")
         print(f"Targets - min: {tf.reduce_min(targets)}, max: {tf.reduce_max(targets)}")
     print("=" * 20)

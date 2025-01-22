@@ -5,99 +5,177 @@ import json
 from model import TransformerModel
 from preprocessing_pipeline import Preprocessing_pipeline
 
+# Set environment variables to suppress warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF logging
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Suppress tokenizer warnings
+
 class Training_pipeline:
-    def __init__(self, model, preprocessor, batch_size=32, learning_rate=0.001):
+    def __init__(self, model, preprocessor, batch_size=64, learning_rate=0.001):
         self.model = model
         self.preprocessor = preprocessor
         self.batch_size = batch_size
-        self.learning_rate = learning_rate
+        self.initial_learning_rate = learning_rate
         
-        # Compile model
+        # Enable mixed precision
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+        
+        # Learning rate schedule
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+            initial_learning_rate=learning_rate,
+            first_decay_steps=1000,
+            t_mul=2.0,
+            m_mul=0.9,
+            alpha=0.1
+        )
+        
+        # Compile model with mixed precision
         self.model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            optimizer=tf.keras.optimizers.AdamW(
+                learning_rate=lr_schedule,
+                weight_decay=0.01,
+                beta_1=0.9,
+                beta_2=0.999,
+                epsilon=1e-7
+            ),
             loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-            metrics=['accuracy']
+            metrics=['accuracy'],
+            jit_compile=True  # Enable XLA compilation
         )
     
-    def prepare_datasets(self, full_dataset, train_size=0.8, val_size=0.2, use_percentage=0.1):
+    def optimize_dataset(self, dataset):
+        """Apply performance optimizations to dataset"""
+        def reshape_targets(x, y):
+            return {'input_ids': x}, tf.reshape(y, [-1])
+            
+        return dataset.cache() \
+            .shuffle(buffer_size=10000) \
+            .batch(self.batch_size) \
+            .map(reshape_targets) \
+            .prefetch(tf.data.AUTOTUNE)
+    
+    def prepare_datasets(self, full_dataset, train_size=0.8, val_size=0.2, use_percentage=0.005):
         """Split dataset into training and validation sets"""
-        # Calculate total dataset size
-        dataset_size = sum(1 for _ in full_dataset)
+        # Calculate total dataset size using cardinality
+        dataset_size = tf.data.experimental.cardinality(full_dataset).numpy()
         print(f"\nTotal sequences available: {dataset_size}")
         
-        # Take percentage of data
-        subset_size = int(dataset_size * use_percentage)
-        dataset_subset = full_dataset.take(subset_size)
-        print(f"Using {use_percentage*100}% of data: {subset_size} sequences")
-        
         # Calculate split sizes
+        subset_size = int(dataset_size * use_percentage)
         train_size = int(subset_size * train_size)
         val_size = int(subset_size * val_size)
+        print(f"Using {use_percentage*100}% of data: {subset_size} sequences")
         print(f"Training sequences: {train_size}")
         print(f"Validation sequences: {val_size}")
         
-        # Split dataset
+        # Take data first, then split
+        dataset_subset = full_dataset.take(subset_size)
         train_dataset = dataset_subset.take(train_size)
         val_dataset = dataset_subset.skip(train_size).take(val_size)
         
+        def prepare_batch(inputs, targets):
+            # Ensure targets are 1D
+            targets = tf.reshape(targets, [-1])
+            return inputs, targets
+        
+        # Apply optimizations in correct order - cache after prepare_batch
+        train_dataset = (train_dataset
+            .shuffle(buffer_size=500)
+            .batch(8)
+            .map(prepare_batch)
+            .cache()
+            .prefetch(tf.data.AUTOTUNE))
+        
+        val_dataset = (val_dataset
+            .batch(8)
+            .map(prepare_batch)
+            .cache()
+            .prefetch(tf.data.AUTOTUNE))
+        
         return train_dataset, val_dataset
-    
-    def train(self, dataset, num_epochs=10):
+
+    def train(self, dataset, num_epochs=5):
         """Train the model using Keras fit method"""
-        # Create experiment directory
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        experiment_dir = os.path.join('experiments', timestamp)
-        os.makedirs(experiment_dir, exist_ok=True)
-        
-        # Split dataset
-        train_dataset, val_dataset = self.prepare_datasets(dataset)
-        
-        # Create callbacks
-        callbacks = [
-            # Save model weights after each epoch
-            tf.keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join(experiment_dir, 'weights.weights.h5'),
-                save_weights_only=True,
-                save_best_only=True,
-                monitor='val_loss'
-            ),
-            # Save training history
-            tf.keras.callbacks.CSVLogger(
-                os.path.join(experiment_dir, 'training_history.csv')
-            ),
-            # TensorBoard logging
-            tf.keras.callbacks.TensorBoard(
-                log_dir=os.path.join(experiment_dir, 'logs'),
-                histogram_freq=1
+        try:
+            # Create experiment directory
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            experiment_dir = os.path.join('experiments', timestamp)
+            os.makedirs(experiment_dir, exist_ok=True)
+            
+            print(f"\nStarting training for {num_epochs} epochs")
+            
+            # Split dataset
+            train_dataset, val_dataset = self.prepare_datasets(dataset)
+            
+            # Create callbacks - simplified for speed
+            callbacks = [
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath=os.path.join(experiment_dir, 'weights.keras'),
+                    save_best_only=True,
+                    monitor='val_loss'
+                ),
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=3,
+                    restore_best_weights=True
+                )
+            ]
+            
+            # Train model with specified epochs
+            history = self.model.fit(
+                train_dataset,
+                validation_data=val_dataset,
+                epochs=num_epochs,
+                callbacks=callbacks,
+                verbose=1
             )
-        ]
-        
-        # Train model
-        history = self.model.fit(
-            train_dataset,
-            validation_data=val_dataset,
-            epochs=num_epochs,
-            callbacks=callbacks
-        )
-        
-        # Save training history as JSON
-        with open(os.path.join(experiment_dir, 'experiment.json'), 'w') as f:
-            json.dump(history.history, f, indent=4)
-        
-        print("\nTraining completed!")
-        print(f"Experiment data saved to: {experiment_dir}")
-        
-        return history
+            
+            print("\nTraining completed!")
+            print(f"Model weights saved to: {os.path.join(experiment_dir, 'weights.keras')}")
+            
+            # Save experiment configuration and history
+            experiment_config = {
+                "timestamp": timestamp,
+                "num_epochs": num_epochs,
+                "batch_size": self.batch_size,
+                "learning_rate": self.initial_learning_rate,
+                "model_params": {
+                    "num_layers": self.model.num_layers,
+                    "d_model": self.model.d_model,
+                    "num_heads": self.model.num_heads,
+                    "dff": self.model.dff,
+                    "dropout_rate": self.model.dropout_rate
+                }
+            }
+            
+            # Save config and history
+            config_path = os.path.join(experiment_dir, 'experiment_config.json')
+            history_path = os.path.join(experiment_dir, 'training_history.json')
+            
+            with open(config_path, 'w') as f:
+                json.dump(experiment_config, f, indent=4)
+            
+            with open(history_path, 'w') as f:
+                history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
+                json.dump(history_dict, f, indent=4)
+            
+            print(f"Configuration saved to: {config_path}")
+            print(f"Training history saved to: {history_path}")
+            
+            return history
+            
+        except Exception as e:
+            print("Error during training:", str(e))
+            raise
 
 
 if __name__ == '__main__':
-    print("Initializing preprocessing pipeline...")
+    print("Testing preprocessing pipeline...")
     PATH = "/Users/rayengallas/Desktop/Coding_projects/Project/data/shakespeare.txt"
     
     # Initialize preprocessor
     preprocessor = Preprocessing_pipeline(
         file_path=PATH,
-        max_length=50,
+        max_length=32,
         batch_size=32,
         model_name='prajjwal1/bert-tiny'
     )
@@ -107,22 +185,17 @@ if __name__ == '__main__':
     
     # Initialize model
     model = TransformerModel(
-        num_layers=4,
-        d_model=256,
-        num_heads=8,
-        dff=512,
-        input_dim=50,  # max sequence length
         vocab_size=preprocessor.vocabulary_size,
-        dropout_rate=0.1
+        max_length=preprocessor.max_length
     )
     
     # Initialize training pipeline
     trainer = Training_pipeline(
         model=model,
         preprocessor=preprocessor,
-        batch_size=32,
+        batch_size=32,  
         learning_rate=0.001
     )
     
     # Train model
-    history = trainer.train(dataset, num_epochs=10)
+    history = trainer.train(dataset, num_epochs=1)
