@@ -53,43 +53,49 @@ class Training_pipeline:
             .map(reshape_targets) \
             .prefetch(tf.data.AUTOTUNE)
     
-    def prepare_datasets(self, full_dataset, train_size=0.8, val_size=0.2, use_percentage=0.005):
+    def prepare_datasets(self, full_dataset, train_size=0.8, val_size=0.2):
         """Split dataset into training and validation sets"""
         # Calculate total dataset size using cardinality
         dataset_size = tf.data.experimental.cardinality(full_dataset).numpy()
-        print(f"\nTotal sequences available: {dataset_size}")
+        print(f"\nTotal sequences in dataset: {dataset_size}")
         
-        # Calculate split sizes
-        subset_size = int(dataset_size * use_percentage)
-        train_size = int(subset_size * train_size)
-        val_size = int(subset_size * val_size)
-        print(f"Using {use_percentage*100}% of data: {subset_size} sequences")
+        if dataset_size == 0:
+            raise ValueError("Input dataset is empty! Check the preprocessing pipeline.")
+        
+        # Calculate split sizes (directly using the full dataset)
+        train_size = int(dataset_size * train_size)
+        val_size = int(dataset_size * val_size)
         print(f"Training sequences: {train_size}")
         print(f"Validation sequences: {val_size}")
         
         # Take data first, then split
-        dataset_subset = full_dataset.take(subset_size)
-        train_dataset = dataset_subset.take(train_size)
-        val_dataset = dataset_subset.skip(train_size).take(val_size)
+        train_dataset = full_dataset.take(train_size)
+        val_dataset = full_dataset.skip(train_size).take(val_size)
         
         def prepare_batch(inputs, targets):
             # Ensure targets are 1D
-            targets = tf.reshape(targets, [-1])
-            return inputs, targets
+            return inputs, tf.reshape(targets, [-1])
         
-        # Apply optimizations in correct order - cache after prepare_batch
+        # Optimize dataset pipeline
         train_dataset = (train_dataset
-            .shuffle(buffer_size=500)
-            .batch(8)
-            .map(prepare_batch)
+            .batch(self.batch_size, drop_remainder=True)  # Batch first for speed
+            .map(prepare_batch, num_parallel_calls=tf.data.AUTOTUNE)
             .cache()
+            .shuffle(buffer_size=100)  # Smaller shuffle buffer
             .prefetch(tf.data.AUTOTUNE))
         
         val_dataset = (val_dataset
-            .batch(8)
-            .map(prepare_batch)
+            .batch(self.batch_size, drop_remainder=True)
+            .map(prepare_batch, num_parallel_calls=tf.data.AUTOTUNE)
             .cache()
             .prefetch(tf.data.AUTOTUNE))
+        
+        # Debug: Check if datasets are empty
+        train_size = sum(1 for _ in train_dataset)
+        val_size = sum(1 for _ in val_dataset)
+        print("\nAfter batching:")
+        print(f"Training batches: {train_size}")
+        print(f"Validation batches: {val_size}")
         
         return train_dataset, val_dataset
 
@@ -106,16 +112,27 @@ class Training_pipeline:
             # Split dataset
             train_dataset, val_dataset = self.prepare_datasets(dataset)
             
-            # Create callbacks - simplified for speed
+            # Check dataset sizes
+            train_size = sum(1 for _ in train_dataset)
+            val_size = sum(1 for _ in val_dataset)
+            print(f"\nDataset sizes:")
+            print(f"Training batches: {train_size}")
+            print(f"Validation batches: {val_size}")
+            
+            if train_size == 0 or val_size == 0:
+                raise ValueError("Dataset is empty! Check the use_percentage parameter and dataset preparation.")
+            
+            # Simplified callbacks for speed
             callbacks = [
                 tf.keras.callbacks.ModelCheckpoint(
                     filepath=os.path.join(experiment_dir, 'weights.keras'),
                     save_best_only=True,
-                    monitor='val_loss'
+                    monitor='val_loss',
+                    save_weights_only=True  # Faster than saving full model
                 ),
                 tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss',
-                    patience=3,
+                    patience=2,  # Reduced patience
                     restore_best_weights=True
                 )
             ]
@@ -176,8 +193,9 @@ if __name__ == '__main__':
     preprocessor = Preprocessing_pipeline(
         file_path=PATH,
         max_length=32,
-        batch_size=32,
-        model_name='prajjwal1/bert-tiny'
+        batch_size=64,
+        model_name='prajjwal1/bert-tiny',
+        use_percentage=0.01 # Use 10% of data
     )
     
     # Create dataset
@@ -193,9 +211,9 @@ if __name__ == '__main__':
     trainer = Training_pipeline(
         model=model,
         preprocessor=preprocessor,
-        batch_size=32,  
+        batch_size=64,
         learning_rate=0.001
     )
     
     # Train model
-    history = trainer.train(dataset, num_epochs=1)
+    history = trainer.train(dataset, num_epochs=10)
