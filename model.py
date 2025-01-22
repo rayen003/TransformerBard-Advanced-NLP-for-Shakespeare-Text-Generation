@@ -4,63 +4,71 @@ from preprocessing_pipeline import Preprocessing_pipeline
 
 
 class TransformerModel(tf.keras.Model):
-    def __init__(self, num_layers, d_model, num_heads, dff, input_dim, vocab_size, dropout_rate=0.1):
-        super(TransformerModel, self).__init__()
-        self.num_layers = num_layers
-        self.d_model = d_model
+    def __init__(self, vocab_size, max_length=32):
+        super().__init__()
         
-        # Token embedding
-        self.token_embedding = tf.keras.layers.Embedding(vocab_size, d_model)
+        # Model dimensions - minimal for fast training
+        self.d_model = 32
+        self.num_heads = 1
+        self.dff = 64
+        self.num_layers = 1
+        self.dropout_rate = 0.1
         
-        # Position embedding
-        self.pos_embedding = tf.keras.layers.Embedding(input_dim=50, output_dim=d_model)
+        # Embeddings
+        self.token_embedding = tf.keras.layers.Embedding(vocab_size, self.d_model)
+        self.pos_embedding = tf.keras.layers.Embedding(max_length, self.d_model)
         
         # Transformer blocks
         self.transformer_blocks = [
-            TransformerBlock(d_model, num_heads, dff, dropout_rate)
-            for _ in range(num_layers)
+            TransformerBlock(self.d_model, self.num_heads, self.dff, self.dropout_rate)
+            for _ in range(self.num_layers)
         ]
         
-        # Final prediction layers
-        self.final_dense = tf.keras.layers.Dense(d_model, activation='relu')
+        # Final layers
         self.final_layer = tf.keras.layers.Dense(vocab_size)
         
-        # Loss metric
+        # Metrics
         self.loss_metric = tf.keras.metrics.Mean(name='train_loss')
     
     def call(self, inputs, training=False):
-        # Handle input dict if necessary
-        if isinstance(inputs, dict):
-            inputs = inputs['input_ids']
-        
-        # Get sequence length and batch size
-        seq_length = tf.shape(inputs)[1]
-        batch_size = tf.shape(inputs)[0]
-        
-        # Create position indices
-        positions = tf.range(start=0, limit=seq_length, delta=1)
-        positions = tf.expand_dims(positions, axis=0)  # Add batch dimension
-        positions = tf.tile(positions, [batch_size, 1])  # Repeat for each item in batch
-        
-        # Get token embeddings
-        x = self.token_embedding(inputs)  # Shape: [batch_size, seq_length, d_model]
-        
-        # Add positional embeddings
-        pos_emb = self.pos_embedding(positions)  # Shape: [batch_size, seq_length, d_model]
-        x = x + pos_emb  # Shape: [batch_size, seq_length, d_model]
-        
-        # Pass through transformer blocks
-        for block in self.transformer_blocks:
-            x = block(x, training=training)  # Shape: [batch_size, seq_length, d_model]
-        
-        # Process each position in the sequence
-        x = self.final_dense(x)  # Shape: [batch_size, seq_length, d_model]
-        
-        # Make predictions for each position
-        logits = self.final_layer(x)  # Shape: [batch_size, seq_length, vocab_size]
-        
-        # We only want the prediction for the last token in each sequence
-        return logits[:, -1, :]  # Shape: [batch_size, vocab_size]
+        try:
+            # Reshape inputs if necessary
+            if len(inputs.shape) == 3:  # (batch, inner_batch, seq_len)
+                batch_size = tf.shape(inputs)[0]
+                inner_batch = tf.shape(inputs)[1]
+                seq_length = tf.shape(inputs)[2]
+                inputs = tf.reshape(inputs, [-1, seq_length])  # Flatten batches
+            else:
+                seq_length = tf.shape(inputs)[1]
+                batch_size = tf.shape(inputs)[0]
+            
+            # Create position indices
+            positions = tf.range(start=0, limit=seq_length, delta=1)
+            positions = tf.expand_dims(positions, axis=0)
+            positions = tf.tile(positions, [tf.shape(inputs)[0], 1])
+            
+            # Get embeddings
+            x = self.token_embedding(inputs)  # [batch_size, seq_len, d_model]
+            pos_emb = self.pos_embedding(positions)  # [batch_size, seq_len, d_model]
+            
+            # Add embeddings
+            x = x + pos_emb  # [batch_size, seq_len, d_model]
+            
+            # Pass through transformer blocks
+            for block in self.transformer_blocks:
+                x = block(x, training=training)  # [batch_size, seq_len, d_model]
+            
+            # Get predictions for the last token
+            x = self.final_layer(x)  # [batch_size, seq_len, vocab_size]
+            x = x[:, -1, :]  # [batch_size, vocab_size]
+            
+            # No need to reshape back - we want [batch_size, vocab_size] for sparse categorical crossentropy
+            return x
+            
+        except Exception as e:
+            tf.print("Error in model.call():", e)
+            tf.print("Input shape:", tf.shape(inputs))
+            raise
 
 class TransformerBlock(tf.keras.layers.Layer):
     def __init__(self, d_model, num_heads, dff, dropout_rate):
@@ -120,13 +128,8 @@ if __name__ == '__main__':
 
     # Initialize model
     model = TransformerModel(
-        num_layers=4,
-        d_model=256,
-        num_heads=8,
-        dff=512,
-        input_dim=50,  # max sequence length
         vocab_size=preprocessor.vocabulary_size,
-        dropout_rate=0.1
+        max_length=50
     )
 
     # Test shapes through the model
@@ -139,7 +142,7 @@ if __name__ == '__main__':
         print(f"- Target shape: {targets.shape}")  # Should be (batch_size,)
         
         # Get model predictions
-        predictions = model(inputs, training=False)
+        predictions = model(inputs['input_ids'], training=False)
         
         print("\n2. Model Internal Shapes:")
         print(f"- After token embedding: {model.token_embedding(inputs['input_ids']).shape}")  # (batch_size, seq_len, d_model)
