@@ -90,9 +90,3 @@ Each experiment is documented in the `experiments/` directory with its own confi
 3. Try different model architectures
 4. Add temperature-based sampling for inference
 
-## Current Results
-Initial model (2024-01-12):
-- Training data: 5% of Shakespeare text
-- Vocabulary size: 11,914 words
-- Test accuracy: 2.80%
-- Test loss: 7.5568
