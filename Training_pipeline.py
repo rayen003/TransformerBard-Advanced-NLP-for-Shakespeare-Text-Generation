@@ -5,7 +5,7 @@ import json
 from model import TransformerModel
 from preprocessing_pipeline import Preprocessing_pipeline
 
-# Set environment variables to suppress warnings
+# Set environment variables 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF logging
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Suppress tokenizer warnings
 
