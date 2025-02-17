@@ -1,6 +1,6 @@
 # TransformerBard: Advanced NLP for Shakespeare Text Generation
 
-A sophisticated implementation of a transformer-based language model for generating Shakespeare-style text. This project showcases advanced natural language processing techniques, attention mechanisms, and deep learning architectures.
+A sophisticated implementation of a transformer-based language model for generating Shakespeare-style text. This project showcases advanced natural language processing techniques, attention mechanisms, and deep learning architecture:
 
 ## Overview
 This repository implements and experiments with various transformer architectures for creative text generation. The project demonstrates proficiency in:
